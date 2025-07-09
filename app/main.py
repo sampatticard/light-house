@@ -1,117 +1,110 @@
-# app/main.py
 
-from fastapi import FastAPI, HTTPException, Path
+
+
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel
-from app.actions import ActionName, PROMPT_TEMPLATES
-from app.schemas import ACTION_PARAM_MODELS
-from app.ollama_client import query_ollama
-from app.browseruse_agent import run_browser_actions
+from formfiller.form_filler import FormFiller
+from formfiller.form_parser import parse_uploaded_form, load_form_config
+from formfiller.field_matcher import match_fields
+from formdiscovery import discover_form
+from browseragent import generate_actions, run_browser_actions, ensure_allowed_domains
 import json
 
-app = FastAPI(title="Sampatti Lighthouse API")
+class LLMChoice(str):
+    pass  # for future enum if needed
 
-class ActionRequest(BaseModel):
-    # This model is dynamic: we’ll validate per-action in the endpoint.
-    pass
 
-@app.post("/action/{action_name}")
-async def do_action(
-    action_name: ActionName = Path(..., description="One of the predefined actions"),
-    params: dict = None
-):
-    """
-    Execute a predefined browseruse action via local SLM + Playwright.
-    """
-    # 1. Validate params via the corresponding Pydantic model
-    ParamModel = ACTION_PARAM_MODELS.get(action_name)
-    if ParamModel is None:
-        raise HTTPException(status_code=400, detail="No parameters model for this action")
+class FillFormRequest(BaseModel):
+    form_type: str
+    llm: str = "ollama"  # or "mcp"
+    prompt: str
+    user_data: dict = {}
+    autofill: bool = True
+    form_url: str = None  # Needed for browser automation
+
+
+app = FastAPI(title="Sampatti Lighthouse MCP+OCR")
+
+
+@app.post("/fill_form", tags=["form"])
+async def fill_form(req: FillFormRequest, file: UploadFile = File(...)):
+    form_filler = FormFiller(llm_type=req.llm)
+    result = await form_filler.fill_form(req.form_type, file, user_data=req.user_data, prompt=req.prompt)
+    # If autofill requested, use browser agent to fill the form
+    browser_results = None
+    if req.autofill and req.form_url:
+        domain = req.form_url.split('/')[2]
+        goal = f"Login if needed then fill {result['matched']} at {req.form_url}"
+        actions = generate_actions(goal, domain)
+        ensure_allowed_domains(actions, [domain])
+        browser_results = {"actions": [a.model_dump() for a in actions], "results": run_browser_actions(actions)}
+    return {**result, "browser_automation": browser_results}
+
+
+
+
+# LLM chat endpoint
+class LLMRequest(BaseModel):
+    prompt: str
+    model: str = "phi3:mini"
+
+class LLMResponse(BaseModel):
+    response: str
+
+
+
+from llm.llm_factory import get_llm_client
+
+@app.post("/llm_chat", response_model=LLMResponse, tags=["llm"])
+async def llm_chat(req: LLMRequest):
     try:
-        # Pydantic validation
-        parsed = ParamModel(**(params or {}))
+        llm_client = get_llm_client("ollama")
+        result = await llm_client.query(req.prompt, req.model)
+        return LLMResponse(response=result)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        raise HTTPException(500, str(e))
 
-    # 2. Build prompt
-    template = PROMPT_TEMPLATES.get(action_name)
-    if template is None:
-        raise HTTPException(status_code=500, detail="No prompt template configured")
-    prompt = template.format(**parsed.dict())
+#Step 1: Discover
 
-    # 3. Query local Ollama SLM
-    # Optionally set temperature=0 or low to reduce randomness
-    raw_output = query_ollama(prompt)
-    # 4. Parse JSON
-    try:
-        actions_list = json.loads(raw_output)
-    except json.JSONDecodeError as e:
-        # If malformed, optionally try a repair prompt or return error
-        raise HTTPException(status_code=500, detail=f"SLM output not valid JSON: {e}: {raw_output}")
+class DiscoverReq(BaseModel): user_request: str
+@app.post("/discover", tags=["1-discover"] )
+def api_discover(r: DiscoverReq):
+    try: return discover_form(r.user_request)
+    except Exception as e: raise HTTPException(500,str(e))
 
-    # 5. Validate each action via Pydantic DSL models
-    from app.browseruse_agent import (
-        NavigateAction, ClickAction, TypeAction, WaitAction, ExtractAction
-    )
-    validated_actions = []
-    for obj in actions_list:
-        action_type = obj.get("action")
-        try:
-            if action_type == "navigate":
-                act = NavigateAction(**obj)
-                # Additional: validate domain again
-                from urllib.parse import urlparse
-                domain = urlparse(act.url).netloc
-                # Ensure domain matches the whitelisted domain(s) from params if applicable
-                # E.g., for EXTRACT_RATE_BANK, ensure domain == parsed.bank_domain
-                if action_name == ActionName.EXTRACT_RATE_BANK:
-                    if domain != parsed.bank_domain:
-                        raise ValueError(f"Navigate domain {domain} not allowed for this action")
-            elif action_type == "click":
-                act = ClickAction(**obj)
-            elif action_type == "type":
-                act = TypeAction(**obj)
-            elif action_type == "wait":
-                act = WaitAction(**obj)
-            elif action_type == "extract":
-                act = ExtractAction(**obj)
-            else:
-                raise ValueError(f"Unknown action type: {action_type}")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Action validation error: {e}")
-        validated_actions.append(act)
+#Step 2: Extract fields
 
-    # 6. Execute via Playwright
-    try:
-        results = run_browser_actions(validated_actions)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Browser execution error: {e}")
+class ExtractReq(BaseModel): form_url: str
+@app.post("/extract_fields", tags=["2-extract"] )
+def api_extract(r: ExtractReq):
+    domain=r.form_url.split('/')[2]
+    goal="extract all form inputs and labels"
+    actions=generate_actions(goal,domain)
+    ensure_allowed_domains(actions,[domain])
+    return {"actions":[a.model_dump() for a in actions],"results":run_browser_actions(actions)}
 
-    # 7. Summarize if desired
-    summary = None
-    try:
-        summary_prompt = (
-            "Summarize the following extracted data in concise terms:\n"
-            + json.dumps(results, indent=2)
-        )
-        summary = query_ollama(summary_prompt)
-    except Exception:
-        summary = "Failed to summarize results."
+#Step 3: Parse docs
 
-    return {"actions": [a.dict() for a in validated_actions], "results": results, "summary": summary}
+@app.post("/parse/{form_type}", tags=["3-parse"] )
+async def api_parse(form_type: str, file: UploadFile=File(...)):
+    try: return {"fields":await parse_uploaded_form(form_type,file)}
+    except HTTPException as he: raise he
+    except Exception as e: raise HTTPException(500,str(e))
 
-#Auto-Form Parsing Endpoint
-from fastapi import FastAPI, UploadFile, File, Form
-from app.form_parser import parse_uploaded_form
-from fastapi.responses import JSONResponse
-@app.post("/parse/{form_type}")
-async def parse_form(form_type: str, file: UploadFile = File(...)):
-    """
-    Upload a document to auto-parse fields for the given form_type.
-    """
-    try:
-        result = await parse_uploaded_form(form_type, file)
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    return JSONResponse(content={"fields": result})
+class MatchReq(BaseModel): form_type: str; extracted_fields: list[dict]; user_data: dict
+@app.post("/match_fields", tags=["3-match"] )
+def api_match(r: MatchReq):
+    cfg=load_form_config(r.form_type)
+    m,miss=match_fields(r.extracted_fields,r.user_data,cfg)
+    return {"matched":m,"missing":miss}
+
+#Step 4: Autofill
+
+class AutoReq(BaseModel): form_url:str; matched_values:dict; login:dict|None=None
+@app.post("/autofill", tags=["4-autofill"] )
+def api_autofill(r: AutoReq):
+    domain=r.form_url.split('/')[2]
+    goal=f"Login if needed then fill {r.matched_values} at {r.form_url}"
+    actions=generate_actions(goal,domain)
+    ensure_allowed_domains(actions,[domain])
+    return {"actions":[a.model_dump() for a in actions],"results":run_browser_actions(actions)}

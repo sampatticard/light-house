@@ -1,0 +1,14 @@
+{
+  "name": "sampatti-frontend",
+  "version": "1.0.0",
+  "scripts": {
+    "start-local-backend": "python scripts/start_local.py",
+    "start": "concurrently \"npm:watch-frontend\" \"npm:watch-backend\"",
+    "watch-backend": "nodemon --exec \"python scripts/start_local.py\" --ignore frontend/",
+    "watch-frontend": "react-scripts start"
+  },
+  "devDependencies": {
+    "concurrently": "^7.0.0",
+    "nodemon": "^2.0.0"
+  }
+}
