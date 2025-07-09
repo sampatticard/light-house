@@ -6,8 +6,34 @@ export class Database {
   private db: sqlite3.Database;
 
   constructor(dbPath: string) {
-    this.db = new sqlite3.Database(dbPath);
-    this.initializeDatabase();
+    try {
+      // Make sure we're using a fully resolved absolute path
+      const absolutePath = path.resolve(dbPath);
+      
+      // Ensure the directory for the database exists
+      const dbDir = path.dirname(absolutePath);
+      const fs = require('fs');
+      if (!fs.existsSync(dbDir)) {
+        fs.mkdirSync(dbDir, { recursive: true });
+      }
+      
+      // Open the database with additional flags for better reliability
+      // Using verbose mode for better error messages
+      const sqlite3Verbose = sqlite3.verbose();
+      this.db = new sqlite3Verbose.Database(absolutePath, sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE);
+      
+      // Improve database reliability by setting some pragmas
+      this.db.serialize(() => {
+        this.db.run('PRAGMA journal_mode = WAL;');
+        this.db.run('PRAGMA busy_timeout = 5000;');
+        this.db.run('PRAGMA synchronous = NORMAL;');
+        this.initializeDatabase();
+      });
+    } catch (err) {
+      console.error(`Database initialization error: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`Attempted database path: ${dbPath}`);
+      throw err;
+    }
   }
 
   private initializeDatabase(): void {
@@ -195,6 +221,13 @@ export class Database {
   }
 
   close(): void {
-    this.db.close();
+    try {
+      if (this.db) {
+        this.db.close();
+      }
+    } catch (err) {
+      console.error(`Error closing database: ${err instanceof Error ? err.message : String(err)}`);
+      // Don't rethrow as we want cleanup to continue even if there's an error
+    }
   }
 }
