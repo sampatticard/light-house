@@ -1,0 +1,9 @@
+flask
+flask-cors
+python-dotenv
+requests
+gunicorn
+openai
+langchain-openai
+browser-use
+baml

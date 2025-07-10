@@ -1,7 +1,0 @@
-langchain
-langchain-community
-duckduckgo-search
-browser-use
-python-dotenv
-playwright
-
