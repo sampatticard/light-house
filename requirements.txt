@@ -1,7 +1,9 @@
 fastapi
 uvicorn
 requests
-pillow
-pytesseract
-pdfplumber
+playwright
 pydantic
+easyocr
+pdfplumber
+pyyaml
+python-multipart
