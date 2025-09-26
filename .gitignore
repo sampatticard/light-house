@@ -1,2 +1,52 @@
-node_modules
-test/venv
+# Node.js dependencies
+**/node_modules/
+node_modules/
+
+# Python virtual environments
+**/venv/
+**/env/
+**/.venv/
+**/.env/
+venv/
+env/
+.venv/
+.env/
+
+# Python cache files
+**/__pycache__/
+__pycache__/
+**/*.pyc
+*.pyc
+**/*.pyo
+*.pyo
+**/*.pyd
+*.pyd
+.Python
+
+# IDE and editor files
+.vscode/
+.idea/
+**/.DS_Store
+.DS_Store
+
+# Logs
+*.log
+**/*.log
+
+# Build and distribution directories
+coverage/
+dist/
+build/
+**/coverage/
+**/dist/
+**/build/
+
+# Environment variables
+.env
+**/.env
+
+# Temporary files
+*.tmp
+*.temp
+**/*.tmp
+**/*.temp
